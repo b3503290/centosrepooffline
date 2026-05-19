@@ -1,0 +1,22 @@
+# Default: ignore everything in this repository.
+*
+
+# Keep Git metadata helpers and project documentation.
+!.gitignore
+!README.md
+!README.MD
+
+# Upload Python scripts.
+!python/
+!python/**
+
+# Upload root log folder if present.
+!log/
+!log/**
+
+# Do not upload generated CentOS version folders.
+centos*/
+
+# Never upload Python bytecode/cache files.
+python/**/__pycache__/
+python/**/*.pyc
