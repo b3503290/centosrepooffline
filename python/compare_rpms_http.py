@@ -191,7 +191,7 @@ def parse_repo_arg(value: str) -> list[str]:
         return []
     repos = [item.strip() for item in value.split(",") if item.strip()]
     if not repos:
-        raise ValueError("--repos must be auto or contain at least one repo name")
+        raise ValueError("--repos 必須是 auto，或至少包含一個 repo 名稱")
     return repos
 
 
@@ -492,23 +492,28 @@ def prompt_disc_source() -> tuple[Path | None, Path | None]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare local RPMs and download missing RPMs from a CentOS base URL.")
-    parser.add_argument("--disc-root", type=Path, default=None, help="Mounted DVD/ISO root containing repo folders.")
-    parser.add_argument("--iso-path", type=Path, default=None, help="ISO file path. When set, the script mounts it and uses it as disc source.")
-    parser.add_argument("--local-root", type=Path, default=None, help="Deprecated alias for --download-root.")
-    parser.add_argument("--download-root", type=Path, default=None, help="Where RPMs are saved. Defaults to centosN inferred from --base-url.")
-    parser.add_argument("--base-url", default=None, help="CentOS base URL, for example https://mirror.stream.centos.org/9-stream/.")
-    parser.add_argument("--arch", default="x86_64", help="Repository architecture folder under each repo.")
-    parser.add_argument("--repos", default="auto", help="Comma-separated repo folders to compare, or auto for every folder under base URL.")
-    parser.add_argument("--appstream-url", default=None, help="Remote AppStream repo URL.")
-    parser.add_argument("--baseos-url", default=None, help="Remote BaseOS repo URL.")
-    parser.add_argument("--log-root", type=Path, default=None, help="Log root folder. Defaults to download-root/log.")
-    parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR, help="Local RPM inventory cache folder.")
-    parser.add_argument("--refresh-local-cache", action="store_true", help="Rescan DVD/ISO and download RPM folders and rewrite cache.")
-    parser.add_argument("--date", default=dt.date.today().isoformat(), help="Log date folder, format YYYY-MM-DD.")
-    parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout seconds.")
-    parser.add_argument("--dry-run", action="store_true", help="Only write reports; do not download.")
-    parser.add_argument("--verify-checksum", action="store_true", help="Verify local file checksums when possible.")
+    parser = argparse.ArgumentParser(
+        description="比對本機 RPM 與 CentOS 遠端 repo，只下載光碟與下載資料夾都缺少的 RPM。",
+        add_help=False,
+    )
+    parser._optionals.title = "選項"
+    parser.add_argument("-h", "--help", action="help", help="顯示此說明訊息並結束。")
+    parser.add_argument("--disc-root", type=Path, default=None, help="已掛載的光碟或 ISO 根目錄，例如 E:\\。")
+    parser.add_argument("--iso-path", type=Path, default=None, help="ISO 檔案路徑；提供後程式會自動掛載並當作光碟來源。")
+    parser.add_argument("--local-root", type=Path, default=None, help="舊參數，等同於 --download-root。")
+    parser.add_argument("--download-root", type=Path, default=None, help="RPM 下載根目錄；未指定時會依 --base-url 推測 centos9、centos10。")
+    parser.add_argument("--base-url", default=None, help="CentOS base URL，例如 https://mirror.stream.centos.org/9-stream/。")
+    parser.add_argument("--arch", default="x86_64", help="repo 架構資料夾名稱，預設 x86_64。")
+    parser.add_argument("--repos", default="auto", help="要處理的 repo，以逗號分隔；auto 表示自動處理 base URL 下所有 repo。")
+    parser.add_argument("--appstream-url", default=None, help="直接指定 AppStream repo URL；通常不需要，建議使用 --base-url。")
+    parser.add_argument("--baseos-url", default=None, help="直接指定 BaseOS repo URL；通常不需要，建議使用 --base-url。")
+    parser.add_argument("--log-root", type=Path, default=None, help="log 根目錄；未指定時使用 download-root/log。")
+    parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR, help="本機 RPM 清單快取資料夾。")
+    parser.add_argument("--refresh-local-cache", action="store_true", help="重新掃描光碟與下載資料夾，並重建快取。")
+    parser.add_argument("--date", default=dt.date.today().isoformat(), help="log 日期資料夾名稱，格式 YYYY-MM-DD。")
+    parser.add_argument("--timeout", type=int, default=60, help="HTTP 連線逾時秒數。")
+    parser.add_argument("--dry-run", action="store_true", help="只產生報表與顯示待下載清單，不實際下載。")
+    parser.add_argument("--verify-checksum", action="store_true", help="比對既有檔案時也檢查 checksum，較慢但更嚴格。")
     return parser.parse_args()
 
 
