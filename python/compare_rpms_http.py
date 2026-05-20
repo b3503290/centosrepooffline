@@ -2,7 +2,7 @@
 """Compare local RPM folders with remote CentOS repos and download new RPMs.
 
 Default workflow:
-1. Read the initial DVD/ISO RPMs from D:\\ repo folders.
+1. Ask for an ISO file path or mounted DVD/ISO folder path.
 2. Ask for the local download folder and create repo/Packages folders as needed.
 3. Ask for the remote CentOS base URL, such as https://mirror.stream.centos.org/9-stream/.
 4. Find repo folders under the base URL and read their x86_64/os repository metadata.
@@ -19,6 +19,7 @@ import hashlib
 from html.parser import HTMLParser
 import lzma
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -108,6 +109,52 @@ def infer_download_root(base_url: str | None) -> Path:
 
 def absolute_path(path: Path) -> Path:
     return path.expanduser().resolve()
+
+
+def powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def run_powershell(command: str) -> str:
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(message)
+    return result.stdout.strip()
+
+
+def mount_iso(iso_path: Path) -> Path:
+    if os.name != "nt":
+        raise RuntimeError("ISO 自動掛載目前只支援 Windows；Linux 請先自行掛載 ISO，再用 --disc-root 指向掛載路徑。")
+
+    resolved_iso = absolute_path(iso_path)
+    if not resolved_iso.is_file():
+        raise FileNotFoundError(f"找不到 ISO 檔案: {resolved_iso}")
+
+    quoted_iso = powershell_quote(str(resolved_iso))
+    command = (
+        f"$ImagePath = {quoted_iso}; "
+        "$null = Mount-DiskImage -ImagePath $ImagePath; "
+        "Start-Sleep -Milliseconds 500; "
+        "$Volume = Get-DiskImage -ImagePath $ImagePath | Get-Volume | Select-Object -First 1; "
+        "if (-not $Volume -or -not $Volume.DriveLetter) { throw 'ISO 已掛載，但找不到磁碟代號。' }; "
+        "Write-Output ($Volume.DriveLetter + ':\\')"
+    )
+    drive_root = run_powershell(command).splitlines()[-1].strip()
+    return Path(drive_root)
+
+
+def dismount_iso(iso_path: Path) -> None:
+    if os.name != "nt":
+        return
+    resolved_iso = absolute_path(iso_path)
+    quoted_iso = powershell_quote(str(resolved_iso))
+    run_powershell(f"Dismount-DiskImage -ImagePath {quoted_iso}")
 
 
 def request_bytes(url: str, timeout: int) -> bytes:
@@ -429,9 +476,25 @@ def prompt_download_root(default: Path) -> Path:
         print("請輸入 Y 或其他資料夾路徑。")
 
 
+def prompt_disc_source() -> tuple[Path | None, Path | None]:
+    while True:
+        answer = input("請輸入 ISO 檔完整路徑，或已掛載光碟資料夾路徑，例如 E:\\: ").strip().strip('"')
+        if not answer:
+            print("路徑不可空白，請重新輸入。")
+            continue
+
+        path = absolute_path(Path(answer))
+        if path.is_file() and path.suffix.lower() == ".iso":
+            return path, None
+        if path.is_dir():
+            return None, path
+        print("找不到此 ISO 檔或資料夾，請重新輸入。")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare local RPMs and download missing RPMs from a CentOS base URL.")
-    parser.add_argument("--disc-root", type=Path, default=Path("D:/"), help="Initial DVD/ISO root containing repo folders.")
+    parser.add_argument("--disc-root", type=Path, default=None, help="Mounted DVD/ISO root containing repo folders.")
+    parser.add_argument("--iso-path", type=Path, default=None, help="ISO file path. When set, the script mounts it and uses it as disc source.")
     parser.add_argument("--local-root", type=Path, default=None, help="Deprecated alias for --download-root.")
     parser.add_argument("--download-root", type=Path, default=None, help="Where RPMs are saved. Defaults to centosN inferred from --base-url.")
     parser.add_argument("--base-url", default=None, help="CentOS base URL, for example https://mirror.stream.centos.org/9-stream/.")
@@ -460,7 +523,17 @@ def main() -> int:
         download_root = prompt_download_root(default_download_root)
     else:
         download_root = absolute_path(download_root)
-    disc_root = args.disc_root
+    mounted_iso_path = args.iso_path
+    disc_root_arg = args.disc_root
+    if not mounted_iso_path and not disc_root_arg:
+        mounted_iso_path, disc_root_arg = prompt_disc_source()
+
+    if mounted_iso_path:
+        disc_root = mount_iso(mounted_iso_path)
+        print(f"ISO 已掛載，光碟來源: {disc_root}")
+    else:
+        disc_root = absolute_path(disc_root_arg)
+        print(f"使用已掛載光碟來源: {disc_root}")
     download_root.mkdir(parents=True, exist_ok=True)
     log_root = args.log_root or download_root / "log"
     log_dir = log_root / args.date
@@ -469,109 +542,115 @@ def main() -> int:
     print(f"實際下載根目錄: {download_root}")
     print(f"實際 log 根目錄: {absolute_path(log_root)}")
 
-    repo_urls = build_repo_urls(args)
+    try:
+        repo_urls = build_repo_urls(args)
 
-    all_failures: list[tuple[object, ...]] = []
-    all_to_download: list[tuple[object, ...]] = []
-    all_downloaded: list[tuple[object, ...]] = []
+        all_failures: list[tuple[object, ...]] = []
+        all_to_download: list[tuple[object, ...]] = []
+        all_downloaded: list[tuple[object, ...]] = []
 
-    for repo, repo_url in repo_urls.items():
-        print(f"建立光碟 {repo} RPM 清單...")
-        disc_rpms, disc_source = get_local_rpms(
-            local_root=disc_root,
-            repo=repo,
-            cache_dir=args.cache_dir,
-            cache_source="disc",
-            refresh_cache=args.refresh_local_cache,
-            create_missing=False,
-        )
-        print(f"{repo} 光碟清單來源: {'快取' if disc_source == 'cache' else '重新掃描'} ({len(disc_rpms)} 個 RPM)")
+        for repo, repo_url in repo_urls.items():
+            print(f"建立光碟 {repo} RPM 清單...")
+            disc_rpms, disc_source = get_local_rpms(
+                local_root=disc_root,
+                repo=repo,
+                cache_dir=args.cache_dir,
+                cache_source="disc",
+                refresh_cache=args.refresh_local_cache,
+                create_missing=False,
+            )
+            print(f"{repo} 光碟清單來源: {'快取' if disc_source == 'cache' else '重新掃描'} ({len(disc_rpms)} 個 RPM)")
 
-        print(f"建立下載資料夾 {repo} RPM 清單...")
-        repo_download_dir = download_root / repo / PACKAGES_DIR
-        download_rpms, download_source = get_local_rpms(
-            local_root=download_root,
-            repo=repo,
-            cache_dir=args.cache_dir,
-            cache_source="download",
-            refresh_cache=args.refresh_local_cache,
-            create_missing=True,
-        )
-        print(f"{repo} 下載資料夾: {repo_download_dir}")
-        print(f"{repo} 下載清單來源: {'快取' if download_source == 'cache' else '重新掃描'} ({len(download_rpms)} 個 RPM)")
+            print(f"建立下載資料夾 {repo} RPM 清單...")
+            repo_download_dir = download_root / repo / PACKAGES_DIR
+            download_rpms, download_source = get_local_rpms(
+                local_root=download_root,
+                repo=repo,
+                cache_dir=args.cache_dir,
+                cache_source="download",
+                refresh_cache=args.refresh_local_cache,
+                create_missing=True,
+            )
+            print(f"{repo} 下載資料夾: {repo_download_dir}")
+            print(f"{repo} 下載清單來源: {'快取' if download_source == 'cache' else '重新掃描'} ({len(download_rpms)} 個 RPM)")
 
-        local_by_name = merge_local_rpms(disc_rpms, download_rpms)
-        write_tsv(
-            log_dir / f"{repo}_disc_rpms.tsv",
-            [(rpm.relative_path, rpm.filename, rpm.size, rpm.path) for rpm in disc_rpms],
-        )
-        write_tsv(
-            log_dir / f"{repo}_download_rpms.tsv",
-            [(rpm.relative_path, rpm.filename, rpm.size, rpm.path) for rpm in download_rpms],
-        )
+            local_by_name = merge_local_rpms(disc_rpms, download_rpms)
+            write_tsv(
+                log_dir / f"{repo}_disc_rpms.tsv",
+                [(rpm.relative_path, rpm.filename, rpm.size, rpm.path) for rpm in disc_rpms],
+            )
+            write_tsv(
+                log_dir / f"{repo}_download_rpms.tsv",
+                [(rpm.relative_path, rpm.filename, rpm.size, rpm.path) for rpm in download_rpms],
+            )
 
-        print(f"讀取遠端 {repo} metadata...")
-        remote_rpms = load_remote_repo(repo, repo_url, args.timeout)
-        write_tsv(
-            log_dir / f"{repo}_remote_rpms.tsv",
-            [(rpm.href, rpm.filename, rpm.size, rpm.checksum_type or "", rpm.checksum or "") for rpm in remote_rpms],
-        )
+            print(f"讀取遠端 {repo} metadata...")
+            remote_rpms = load_remote_repo(repo, repo_url, args.timeout)
+            write_tsv(
+                log_dir / f"{repo}_remote_rpms.tsv",
+                [(rpm.href, rpm.filename, rpm.size, rpm.checksum_type or "", rpm.checksum or "") for rpm in remote_rpms],
+            )
 
-        repo_to_download: list[tuple[RemoteRpm, str]] = []
-        for remote in remote_rpms:
-            should_download, reason = needs_download(remote, local_by_name, args.verify_checksum)
-            if should_download:
-                repo_to_download.append((remote, reason))
-                all_to_download.append((repo, remote.href, remote.size, reason))
+            repo_to_download: list[tuple[RemoteRpm, str]] = []
+            for remote in remote_rpms:
+                should_download, reason = needs_download(remote, local_by_name, args.verify_checksum)
+                if should_download:
+                    repo_to_download.append((remote, reason))
+                    all_to_download.append((repo, remote.href, remote.size, reason))
 
-        print(f"{repo} 需要下載 {len(repo_to_download)} 個 RPM")
-        repo_downloaded = False
-        for index, (remote, reason) in enumerate(repo_to_download, start=1):
-            destination = destination_for(download_root, remote)
-            if args.dry_run:
-                print(f"[dry-run {repo} {index}/{len(repo_to_download)}] {remote.filename} -> {repo_download_dir} ({reason})")
-                continue
-            try:
-                print(f"[{repo} {index}/{len(repo_to_download)}] 下載 {remote.filename} -> {repo_download_dir} ({reason})")
-                download_rpm(repo_url, remote, destination, args.timeout)
-                if destination.stat().st_size != remote.size:
-                    raise RuntimeError(f"downloaded size mismatch: {destination.stat().st_size} != {remote.size}")
-                downloaded_rpm = local_rpm_from_download(download_root, remote)
-                local_by_name[downloaded_rpm.filename] = downloaded_rpm
-                all_downloaded.append((repo, remote.href, remote.size, destination))
-                repo_downloaded = True
-            except (HTTPError, URLError, OSError, RuntimeError) as exc:
-                all_failures.append((repo, remote.href, exc))
-                print(f"下載失敗: {remote.href}: {exc}")
+            print(f"{repo} 需要下載 {len(repo_to_download)} 個 RPM")
+            repo_downloaded = False
+            for index, (remote, reason) in enumerate(repo_to_download, start=1):
+                destination = destination_for(download_root, remote)
+                if args.dry_run:
+                    print(f"[dry-run {repo} {index}/{len(repo_to_download)}] {remote.filename} -> {repo_download_dir} ({reason})")
+                    continue
+                try:
+                    print(f"[{repo} {index}/{len(repo_to_download)}] 下載 {remote.filename} -> {repo_download_dir} ({reason})")
+                    download_rpm(repo_url, remote, destination, args.timeout)
+                    if destination.stat().st_size != remote.size:
+                        raise RuntimeError(f"downloaded size mismatch: {destination.stat().st_size} != {remote.size}")
+                    downloaded_rpm = local_rpm_from_download(download_root, remote)
+                    local_by_name[downloaded_rpm.filename] = downloaded_rpm
+                    all_downloaded.append((repo, remote.href, remote.size, destination))
+                    repo_downloaded = True
+                except (HTTPError, URLError, OSError, RuntimeError) as exc:
+                    all_failures.append((repo, remote.href, exc))
+                    print(f"下載失敗: {remote.href}: {exc}")
 
-        if not args.dry_run and repo_downloaded:
-            refreshed_download_rpms = [
-                rpm for rpm in local_by_name.values()
-                if path_belongs_to_repo(rpm.path, download_root, repo)
-            ]
-            save_local_cache(args.cache_dir, "download", repo, refreshed_download_rpms)
+            if not args.dry_run and repo_downloaded:
+                refreshed_download_rpms = [
+                    rpm for rpm in local_by_name.values()
+                    if path_belongs_to_repo(rpm.path, download_root, repo)
+                ]
+                save_local_cache(args.cache_dir, "download", repo, refreshed_download_rpms)
 
-    write_tsv(log_dir / "to_download.tsv", all_to_download)
-    write_tsv(log_dir / "downloaded.tsv", all_downloaded)
-    write_tsv(log_dir / "failed.tsv", all_failures)
-    write_tsv(args.cache_dir / "latest_to_download.tsv", all_to_download)
-    write_tsv(args.cache_dir / "latest_downloaded.tsv", all_downloaded)
+        write_tsv(log_dir / "to_download.tsv", all_to_download)
+        write_tsv(log_dir / "downloaded.tsv", all_downloaded)
+        write_tsv(log_dir / "failed.tsv", all_failures)
+        write_tsv(args.cache_dir / "latest_to_download.tsv", all_to_download)
+        write_tsv(args.cache_dir / "latest_downloaded.tsv", all_downloaded)
 
-    summary_rows = [
-        ("disc_root", disc_root),
-        ("download_root", download_root),
-        ("cache_dir", args.cache_dir),
-        ("refresh_local_cache", args.refresh_local_cache),
-        ("dry_run", args.dry_run),
-        ("to_download", len(all_to_download)),
-        ("downloaded", len(all_downloaded)),
-        ("failed", len(all_failures)),
-    ]
-    write_tsv(log_dir / "summary.tsv", summary_rows)
+        summary_rows = [
+            ("disc_root", disc_root),
+            ("iso_path", mounted_iso_path or ""),
+            ("download_root", download_root),
+            ("cache_dir", args.cache_dir),
+            ("refresh_local_cache", args.refresh_local_cache),
+            ("dry_run", args.dry_run),
+            ("to_download", len(all_to_download)),
+            ("downloaded", len(all_downloaded)),
+            ("failed", len(all_failures)),
+        ]
+        write_tsv(log_dir / "summary.tsv", summary_rows)
 
-    print(f"完成。log 位置: {log_dir}")
-    print(f"需下載: {len(all_to_download)}, 已下載: {len(all_downloaded)}, 失敗: {len(all_failures)}")
-    return 1 if all_failures else 0
+        print(f"完成。log 位置: {log_dir}")
+        print(f"需下載: {len(all_to_download)}, 已下載: {len(all_downloaded)}, 失敗: {len(all_failures)}")
+        return 1 if all_failures else 0
+    finally:
+        if mounted_iso_path:
+            dismount_iso(mounted_iso_path)
+            print(f"ISO 已卸載: {absolute_path(mounted_iso_path)}")
 
 
 if __name__ == "__main__":

@@ -28,11 +28,25 @@ centos10/BaseOS/Packages/*.rpm
 
 ## 主要流程
 
-`D:\` 會被當成初始光碟或 ISO 掛載來源。程式會先記錄光碟上的 RPM，例如：
+程式會要求輸入初始光碟來源。可以輸入 ISO 檔完整路徑，或已掛載光碟的資料夾路徑。
+
+ISO 檔範例：
 
 ```text
-D:\AppStream\Packages
-D:\BaseOS\Packages
+C:\ISO\CentOS-Stream-9.iso
+```
+
+已掛載光碟路徑範例：
+
+```text
+E:\
+```
+
+程式會先記錄光碟上的 RPM，例如：
+
+```text
+E:\AppStream\Packages
+E:\BaseOS\Packages
 ```
 
 接著輸入 CentOS base URL。程式會自動找出該網址下的 repo 資料夾，例如：
@@ -94,7 +108,13 @@ python python/compare_rpms_http.py --download-root .\centos9 --base-url https://
 python python/compare_rpms_http.py --download-root .\centos10 --base-url https://mirror.stream.centos.org/10-stream/
 ```
 
-如果光碟或 ISO 不是掛在 `D:\`，可指定 `--disc-root`：
+如果要指定 ISO 檔：
+
+```powershell
+python python/compare_rpms_http.py --iso-path C:\ISO\CentOS-Stream-9.iso --download-root .\centos9 --base-url https://mirror.stream.centos.org/9-stream/
+```
+
+如果 ISO 已經掛載成光碟機，可指定 `--disc-root`：
 
 ```powershell
 python python/compare_rpms_http.py --disc-root E:\ --download-root .\centos9 --base-url https://mirror.stream.centos.org/9-stream/
